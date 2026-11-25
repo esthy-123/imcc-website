@@ -1,660 +1,521 @@
-const TOKEN_KEY = 'imcc_chef_token';
-let postsCache = [];
-let galleryCache = [];
-let servicesCache = [];
-let toastTimer = null;
+const path = require('path');
+const fs = require('fs');
+const express = require('express');
+const { get, all, run, UPLOADS_DIR } = require('../config/database');
+const { requireChefAuth } = require('../middleware/auth');
+const { uploadImage, uploadMedia, isVideoMimeType } = require('../middleware/upload');
 
-function escapeHtml(str) {
-  return String(str || '')
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;')
-    .replace(/'/g, '&#39;');
+const router = express.Router();
+router.use(requireChefAuth);
+
+function inferMediaTypeFromUrl(url) {
+  return /\.(mp4|webm|mov|m4v|ogv|ogg)(\?.*)?$/i.test(String(url || '')) ? 'video' : 'image';
 }
 
-function isVideoMedia(item) {
-  if (!item || !item.image_url) return false;
-  if (item.media_type === 'video') return true;
-  return /\.(mp4|webm|mov|m4v|ogv|ogg)(\?.*)?$/i.test(item.image_url);
+function removeUploadedFile(fileUrl) {
+  if (!fileUrl || typeof fileUrl !== 'string' || !fileUrl.startsWith('/uploads/')) return;
+  const filename = path.basename(fileUrl);
+  const fullPath = path.join(UPLOADS_DIR, filename);
+  if (fs.existsSync(fullPath)) {
+    fs.unlink(fullPath, () => {});
+  }
 }
 
-function pauseAllAdminVideos() {
-  document.querySelectorAll('#dashboard-screen video').forEach((v) => {
-    try {
-      v.pause();
-    } catch {
-      // ignore
-    }
-  });
+function cleanupRequestFile(req) {
+  if (req && req.file && req.file.filename) {
+    removeUploadedFile(`/uploads/${req.file.filename}`);
+  }
 }
 
-function getToken() {
-  return localStorage.getItem(TOKEN_KEY) || '';
+function parsePositiveId(rawId) {
+  const id = Number.parseInt(rawId, 10);
+  return Number.isInteger(id) && id > 0 ? id : null;
 }
 
-function showToast(msg, isError = false) {
-  const toast = document.getElementById('toast');
-  toast.textContent = msg;
-  toast.classList.toggle('error', isError);
-  toast.classList.remove('hidden');
-  if (toastTimer) clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => toast.classList.add('hidden'), 3400);
+function toTrimmedString(val, fallback = '') {
+  if (val === undefined || val === null) return fallback;
+  return String(val).trim();
 }
 
-async function withBusyButton(btn, busyText, fn) {
-  if (!btn) return fn();
-  const originalText = btn.textContent;
-  btn.disabled = true;
-  btn.textContent = busyText;
+function sanitizeHttpUrl(rawUrl) {
+  const trimmed = toTrimmedString(rawUrl);
+  if (!trimmed) return '';
   try {
-    return await fn();
-  } finally {
-    btn.disabled = false;
-    btn.textContent = originalText;
-  }
-}
-
-async function apiFetch(url, options = {}) {
-  const headers = options.headers ? { ...options.headers } : {};
-  const token = getToken();
-  if (token) headers.Authorization = `Bearer ${token}`;
-
-  const res = await fetch(url, { ...options, headers });
-  const data = await res.json().catch(() => ({}));
-
-  if (res.status === 401) {
-    localStorage.removeItem(TOKEN_KEY);
-    showLogin();
-    throw new Error(data.error || 'Session expired. Please sign in again.');
-  }
-  if (!res.ok) {
-    throw new Error(data.error || 'An error occurred.');
-  }
-  return data;
-}
-
-function apiUploadWithProgress(url, method, formData, onProgress) {
-  return new Promise((resolve, reject) => {
-    const xhr = new XMLHttpRequest();
-    xhr.open(method, url, true);
-    const token = getToken();
-    if (token) xhr.setRequestHeader('Authorization', `Bearer ${token}`);
-
-    if (xhr.upload && typeof onProgress === 'function') {
-      xhr.upload.onprogress = (event) => {
-        if (event.lengthComputable && event.total > 0) {
-          onProgress(Math.min(100, Math.round((event.loaded / event.total) * 100)));
-        }
-      };
+    const parsed = new URL(trimmed);
+    if (parsed.protocol === 'http:' || parsed.protocol === 'https:') {
+      return parsed.href;
     }
-
-    xhr.onload = () => {
-      let data = {};
-      try {
-        data = JSON.parse(xhr.responseText || '{}');
-      } catch {
-        data = {};
-      }
-      if (xhr.status === 401) {
-        localStorage.removeItem(TOKEN_KEY);
-        showLogin();
-        reject(new Error(data.error || 'Session expired. Please sign in again.'));
-        return;
-      }
-      if (xhr.status >= 200 && xhr.status < 300) {
-        resolve(data);
-      } else {
-        reject(new Error(data.error || 'An error occurred during upload.'));
-      }
-    };
-
-    xhr.onerror = () => reject(new Error('Network error while uploading file.'));
-    xhr.onabort = () => reject(new Error('Upload cancelled.'));
-    xhr.send(formData);
-  });
-}
-
-function showLogin() {
-  document.getElementById('login-screen').classList.remove('hidden');
-  document.getElementById('dashboard-screen').classList.add('hidden');
-}
-
-function showDashboard(chef) {
-  document.getElementById('login-screen').classList.add('hidden');
-  document.getElementById('dashboard-screen').classList.remove('hidden');
-  if (chef) {
-    document.getElementById('chef-name-display').textContent = chef.name || chef.email;
+  } catch {
+    return null;
   }
+  return null;
 }
 
-/* ==================== AUTHENTICATION ==================== */
+/* ==================== COMPANY PROFILE ==================== */
 
-document.getElementById('login-form').addEventListener('submit', async (e) => {
-  e.preventDefault();
-  const errEl = document.getElementById('login-error');
-  const submitBtn = document.getElementById('login-submit-btn');
-  errEl.classList.add('hidden');
-
-  await withBusyButton(submitBtn, 'Signing in...', async () => {
-    try {
-      const email = document.getElementById('login-email').value.trim();
-      const password = document.getElementById('login-password').value;
-      const data = await apiFetch('/api/auth/login', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ email, password })
-      });
-      localStorage.setItem(TOKEN_KEY, data.token);
-      document.getElementById('login-password').value = '';
-      showDashboard(data.chef);
-      await loadAllAdminData();
-    } catch (err) {
-      errEl.textContent = err.message;
-      errEl.classList.remove('hidden');
-    }
-  });
+router.get('/profile', async (req, res, next) => {
+  try {
+    const profile = await get('SELECT * FROM company_profile WHERE id = 1');
+    res.json(profile);
+  } catch (err) {
+    next(err);
+  }
 });
 
-document.getElementById('logout-btn').addEventListener('click', () => {
-  pauseAllAdminVideos();
-  localStorage.removeItem(TOKEN_KEY);
-  showLogin();
+router.put('/profile', async (req, res, next) => {
+  try {
+    const body = req.body || {};
+    const name = toTrimmedString(body.name);
+    const phone = toTrimmedString(body.phone);
+    const whatsappDigits = toTrimmedString(body.whatsapp).replace(/[^\d]/g, '');
+
+    if (!name || !phone || !whatsappDigits) {
+      return res.status(400).json({ error: 'Company name, phone number, and WhatsApp number are required.' });
+    }
+
+    const socialFields = [
+      ['Instagram URL', body.instagram_url],
+      ['Facebook URL', body.facebook_url],
+      ['LinkedIn URL', body.linkedin_url],
+      ['TikTok URL', body.tiktok_url]
+    ];
+
+    const sanitizedSocials = [];
+    for (const [label, value] of socialFields) {
+      const cleaned = sanitizeHttpUrl(value);
+      if (cleaned === null) {
+        return res.status(400).json({ error: `${label} must start with http:// or https://.` });
+      }
+      sanitizedSocials.push(cleaned);
+    }
+
+    await run(
+      `UPDATE company_profile SET
+        name = ?, tagline = ?, about = ?, vision = ?, mission = ?, values_text = ?,
+        reg_no = ?, tpin = ?, phone = ?, whatsapp = ?, whatsapp_message = ?,
+        email = ?, secondary_email = ?, address = ?,
+        instagram_url = ?, facebook_url = ?, linkedin_url = ?, tiktok_url = ?,
+        updated_at = CURRENT_TIMESTAMP
+       WHERE id = 1`,
+      [
+        name,
+        toTrimmedString(body.tagline),
+        toTrimmedString(body.about),
+        toTrimmedString(body.vision),
+        toTrimmedString(body.mission),
+        toTrimmedString(body.values_text),
+        toTrimmedString(body.reg_no),
+        toTrimmedString(body.tpin),
+        phone,
+        whatsappDigits,
+        toTrimmedString(body.whatsapp_message, 'Hello IMCC, I would like to get in touch.'),
+        toTrimmedString(body.email),
+        toTrimmedString(body.secondary_email),
+        toTrimmedString(body.address, 'Ndola, Zambia'),
+        sanitizedSocials[0],
+        sanitizedSocials[1],
+        sanitizedSocials[2],
+        sanitizedSocials[3]
+      ]
+    );
+
+    const updated = await get('SELECT * FROM company_profile WHERE id = 1');
+    res.json({ message: 'Company profile updated.', profile: updated });
+  } catch (err) {
+    next(err);
+  }
 });
 
-/* ==================== TAB NAVIGATION ==================== */
+router.post('/profile/media', uploadImage.single('image'), async (req, res, next) => {
+  try {
+    if (!req.file) {
+      return res.status(400).json({ error: 'No image file received.' });
+    }
+    const target = req.body.target === 'hero' ? 'hero_image_url' : 'logo_url';
+    const current = await get('SELECT logo_url, hero_image_url FROM company_profile WHERE id = 1');
+    const newUrl = `/uploads/${req.file.filename}`;
 
-document.querySelectorAll('.tab-btn').forEach((btn) => {
-  btn.addEventListener('click', () => {
-    pauseAllAdminVideos();
-    document.querySelectorAll('.tab-btn').forEach((b) => {
-      b.classList.remove('active');
-      b.removeAttribute('aria-current');
+    await run(
+      `UPDATE company_profile SET ${target} = ?, updated_at = CURRENT_TIMESTAMP WHERE id = 1`,
+      [newUrl]
+    );
+
+    if (current && current[target]) {
+      removeUploadedFile(current[target]);
+    }
+
+    const updated = await get('SELECT * FROM company_profile WHERE id = 1');
+    res.json({ message: 'Image updated successfully.', profile: updated });
+  } catch (err) {
+    cleanupRequestFile(req);
+    next(err);
+  }
+});
+
+/* ==================== PUBLICATIONS / POSTS ==================== */
+
+router.get('/posts', async (req, res, next) => {
+  try {
+    const posts = await all('SELECT * FROM posts ORDER BY created_at DESC, id DESC');
+    res.json(posts);
+  } catch (err) {
+    next(err);
+  }
+});
+
+router.post('/posts', uploadMedia, async (req, res, next) => {
+  try {
+    const body = req.body || {};
+    const title = toTrimmedString(body.title);
+    const content = toTrimmedString(body.content);
+    if (!title || !content) {
+      cleanupRequestFile(req);
+      return res.status(400).json({ error: 'Title and content are required.' });
+    }
+
+    const imageUrl = req.file ? `/uploads/${req.file.filename}` : '';
+    const mediaType = req.file && isVideoMimeType(req.file.mimetype) ? 'video' : 'image';
+    const published = body.is_published === '0' || body.is_published === false ? 0 : 1;
+
+    const result = await run(
+      `INSERT INTO posts (title, category, summary, content, image_url, media_type, is_published)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      [
+        title,
+        toTrimmedString(body.category, 'IMANI Mining'),
+        toTrimmedString(body.summary),
+        content,
+        imageUrl,
+        mediaType,
+        published
+      ]
+    );
+
+    const post = await get('SELECT * FROM posts WHERE id = ?', [result.id]);
+    res.status(201).json({ message: 'Publication created.', post });
+  } catch (err) {
+    cleanupRequestFile(req);
+    next(err);
+  }
+});
+
+router.put('/posts/:id', uploadMedia, async (req, res, next) => {
+  try {
+    const id = parsePositiveId(req.params.id);
+    if (!id) {
+      cleanupRequestFile(req);
+      return res.status(400).json({ error: 'Invalid publication ID.' });
+    }
+
+    const existing = await get('SELECT * FROM posts WHERE id = ?', [id]);
+    if (!existing) {
+      cleanupRequestFile(req);
+      return res.status(404).json({ error: 'Publication not found.' });
+    }
+
+    const body = req.body || {};
+    let imageUrl = existing.image_url;
+    let mediaType = existing.media_type || inferMediaTypeFromUrl(existing.image_url);
+    let oldImageToDelete = '';
+
+    if (req.file) {
+      oldImageToDelete = existing.image_url;
+      imageUrl = `/uploads/${req.file.filename}`;
+      mediaType = isVideoMimeType(req.file.mimetype) ? 'video' : 'image';
+    } else if (body.remove_image === '1' || body.remove_image === true) {
+      oldImageToDelete = existing.image_url;
+      imageUrl = '';
+      mediaType = 'image';
+    }
+
+    const published =
+      body.is_published !== undefined
+        ? body.is_published === '0' || body.is_published === false
+          ? 0
+          : 1
+        : existing.is_published;
+
+    await run(
+      `UPDATE posts SET
+        title = ?, category = ?, summary = ?, content = ?,
+        image_url = ?, media_type = ?, is_published = ?, updated_at = CURRENT_TIMESTAMP
+       WHERE id = ?`,
+      [
+        toTrimmedString(body.title, existing.title) || existing.title,
+        toTrimmedString(body.category, existing.category) || existing.category,
+        body.summary !== undefined ? toTrimmedString(body.summary) : existing.summary,
+        toTrimmedString(body.content, existing.content) || existing.content,
+        imageUrl,
+        mediaType,
+        published,
+        id
+      ]
+    );
+
+    if (oldImageToDelete) removeUploadedFile(oldImageToDelete);
+
+    const updated = await get('SELECT * FROM posts WHERE id = ?', [id]);
+    res.json({ message: 'Publication updated.', post: updated });
+  } catch (err) {
+    cleanupRequestFile(req);
+    next(err);
+  }
+});
+
+router.patch('/posts/:id/toggle', async (req, res, next) => {
+  try {
+    const id = parsePositiveId(req.params.id);
+    if (!id) return res.status(400).json({ error: 'Invalid publication ID.' });
+
+    const existing = await get('SELECT * FROM posts WHERE id = ?', [id]);
+    if (!existing) {
+      return res.status(404).json({ error: 'Publication not found.' });
+    }
+    const nextState = existing.is_published ? 0 : 1;
+    await run(
+      'UPDATE posts SET is_published = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?',
+      [nextState, id]
+    );
+    const updated = await get('SELECT * FROM posts WHERE id = ?', [id]);
+    res.json({
+      message: nextState ? 'Publication is now live.' : 'Publication unpublished.',
+      post: updated
     });
-    document.querySelectorAll('.tab-content').forEach((c) => c.classList.remove('active'));
-    btn.classList.add('active');
-    btn.setAttribute('aria-current', 'page');
-    document.getElementById(`tab-${btn.dataset.tab}`).classList.add('active');
-  });
-});
-
-/* ==================== PUBLICATIONS ==================== */
-
-async function loadPosts() {
-  postsCache = await apiFetch('/api/admin/posts');
-  const list = document.getElementById('admin-posts-list');
-  if (!postsCache.length) {
-    list.innerHTML = '<p class="muted">No publications found.</p>';
-    return;
-  }
-
-  list.innerHTML = postsCache
-    .map(
-      (p) => {
-        const isVideo = isVideoMedia(p);
-        const mediaMarkup = p.image_url
-          ? isVideo
-            ? `<video src="${escapeHtml(p.image_url)}#t=0.1" class="item-thumb item-thumb-video" muted playsinline preload="metadata"></video>`
-            : `<img src="${escapeHtml(p.image_url)}" class="item-thumb" alt="${escapeHtml(p.title)}" loading="lazy" />`
-          : '<div class="item-thumb" aria-hidden="true"></div>';
-        return `
-      <div class="item-row">
-        <div class="item-left">
-          ${mediaMarkup}
-          <div>
-            <strong>${escapeHtml(p.title)}</strong>
-            <div class="muted">
-              ${escapeHtml(p.category)} &bull;
-              <span class="status-pill ${p.is_published ? 'status-live' : 'status-draft'}">
-                ${p.is_published ? 'Published' : 'Unpublished'}
-              </span>
-              ${isVideo ? '<span class="status-pill status-video">Video</span>' : ''}
-            </div>
-          </div>
-        </div>
-        <div class="item-actions">
-          <button type="button" class="btn btn-outline btn-sm" data-post-action="edit" data-id="${p.id}">Edit</button>
-          <button type="button" class="btn btn-warn btn-sm" data-post-action="toggle" data-id="${p.id}">${p.is_published ? 'Unpublish' : 'Publish'}</button>
-          <button type="button" class="btn btn-danger btn-sm" data-post-action="delete" data-id="${p.id}">Delete</button>
-        </div>
-      </div>
-    `;
-      }
-    )
-    .join('');
-}
-
-document.getElementById('admin-posts-list').addEventListener('click', async (e) => {
-  const btn = e.target.closest('button[data-post-action]');
-  if (!btn) return;
-  const id = Number(btn.dataset.id);
-  const action = btn.dataset.postAction;
-
-  if (action === 'edit') {
-    const p = postsCache.find((x) => x.id === id);
-    if (!p) return;
-    document.getElementById('post-id').value = p.id;
-    document.getElementById('post-title').value = p.title;
-    document.getElementById('post-category').value = p.category;
-    document.getElementById('post-summary').value = p.summary || '';
-    document.getElementById('post-content').value = p.content;
-    document.getElementById('post-published').checked = Boolean(p.is_published);
-    document.getElementById('post-remove-image').checked = false;
-    document.getElementById('post-remove-img-row').classList.toggle('hidden', !p.image_url);
-    document.getElementById('post-submit-btn').textContent = 'Update Publication';
-    window.scrollTo({ top: 0, behavior: 'smooth' });
-  } else if (action === 'toggle') {
-    try {
-      const res = await apiFetch(`/api/admin/posts/${id}/toggle`, { method: 'PATCH' });
-      showToast(res.message);
-      await loadPosts();
-    } catch (err) {
-      showToast(err.message, true);
-    }
-  } else if (action === 'delete') {
-    if (!confirm('Permanently delete this publication?')) return;
-    try {
-      const res = await apiFetch(`/api/admin/posts/${id}`, { method: 'DELETE' });
-      showToast(res.message);
-      await loadPosts();
-    } catch (err) {
-      showToast(err.message, true);
-    }
+  } catch (err) {
+    next(err);
   }
 });
 
-function resetPostForm() {
-  document.getElementById('post-form').reset();
-  document.getElementById('post-id').value = '';
-  document.getElementById('post-published').checked = true;
-  document.getElementById('post-remove-image').checked = false;
-  document.getElementById('post-remove-img-row').classList.add('hidden');
-  document.getElementById('post-submit-btn').textContent = 'Save Publication';
-}
+router.delete('/posts/:id', async (req, res, next) => {
+  try {
+    const id = parsePositiveId(req.params.id);
+    if (!id) return res.status(400).json({ error: 'Invalid publication ID.' });
 
-document.getElementById('reset-post-form-btn').addEventListener('click', resetPostForm);
-
-document.getElementById('post-form').addEventListener('submit', async (e) => {
-  e.preventDefault();
-  const btn = document.getElementById('post-submit-btn');
-  await withBusyButton(btn, 'Saving...', async () => {
-    try {
-      const id = document.getElementById('post-id').value;
-      const fd = new FormData();
-      fd.append('title', document.getElementById('post-title').value.trim());
-      fd.append('category', document.getElementById('post-category').value);
-      fd.append('summary', document.getElementById('post-summary').value.trim());
-      fd.append('content', document.getElementById('post-content').value.trim());
-      fd.append('is_published', document.getElementById('post-published').checked ? '1' : '0');
-      if (id && document.getElementById('post-remove-image').checked) {
-        fd.append('remove_image', '1');
-      }
-      const file = document.getElementById('post-image').files[0];
-      if (file) fd.append('media', file);
-
-      const url = id ? `/api/admin/posts/${id}` : '/api/admin/posts';
-      const method = id ? 'PUT' : 'POST';
-      const res = await apiUploadWithProgress(url, method, fd, (pct) => {
-        if (file) btn.textContent = pct < 100 ? `Uploading ${pct}%...` : 'Processing...';
-      });
-      showToast(res.message);
-      resetPostForm();
-      await loadPosts();
-    } catch (err) {
-      showToast(err.message, true);
+    const existing = await get('SELECT * FROM posts WHERE id = ?', [id]);
+    if (!existing) {
+      return res.status(404).json({ error: 'Publication not found.' });
     }
-  });
-});
-
-/* ==================== GALLERY (PHOTOS & VIDEOS) ==================== */
-
-async function loadGallery() {
-  galleryCache = await apiFetch('/api/admin/gallery');
-  const list = document.getElementById('admin-gallery-list');
-  if (!galleryCache.length) {
-    list.innerHTML = '<p class="muted">No gallery photos or videos yet.</p>';
-    return;
-  }
-
-  list.innerHTML = galleryCache
-    .map(
-      (g) => {
-        const isVideo = isVideoMedia(g);
-        const mediaEl = isVideo
-          ? `<video src="${escapeHtml(g.image_url)}" class="gallery-admin-video" controls playsinline preload="metadata"></video>`
-          : `<img src="${escapeHtml(g.image_url)}" alt="${escapeHtml(g.title)}" loading="lazy" />`;
-        return `
-      <div class="gallery-admin-card">
-        ${mediaEl}
-        <div class="gallery-admin-body">
-          <strong>${escapeHtml(g.title)}</strong>
-          <div class="muted">
-            ${escapeHtml(g.category)}
-            ${isVideo ? ' &bull; <span class="status-pill status-video">Video with Sound</span>' : ''}
-          </div>
-          <div class="item-actions">
-            <button type="button" class="btn btn-outline btn-sm" data-gallery-action="edit" data-id="${g.id}">Edit / Replace</button>
-            <button type="button" class="btn btn-danger btn-sm" data-gallery-action="delete" data-id="${g.id}">Delete</button>
-          </div>
-        </div>
-      </div>
-    `;
-      }
-    )
-    .join('');
-}
-
-document.getElementById('admin-gallery-list').addEventListener('click', async (e) => {
-  const btn = e.target.closest('button[data-gallery-action]');
-  if (!btn) return;
-  const id = Number(btn.dataset.id);
-  const action = btn.dataset.galleryAction;
-
-  if (action === 'edit') {
-    const g = galleryCache.find((x) => x.id === id);
-    if (!g) return;
-    document.getElementById('gallery-id').value = g.id;
-    document.getElementById('gallery-title').value = g.title;
-    document.getElementById('gallery-category').value = g.category;
-    document.getElementById('gallery-caption').value = g.caption || '';
-    document.getElementById('gallery-submit-btn').textContent = 'Update Media';
-    window.scrollTo({ top: 0, behavior: 'smooth' });
-  } else if (action === 'delete') {
-    if (!confirm('Delete this photo or video from the gallery?')) return;
-    try {
-      const res = await apiFetch(`/api/admin/gallery/${id}`, { method: 'DELETE' });
-      showToast(res.message);
-      await loadGallery();
-    } catch (err) {
-      showToast(err.message, true);
-    }
+    await run('DELETE FROM posts WHERE id = ?', [id]);
+    removeUploadedFile(existing.image_url);
+    res.json({ message: 'Publication deleted permanently.' });
+  } catch (err) {
+    next(err);
   }
 });
 
-function resetGalleryForm() {
-  document.getElementById('gallery-form').reset();
-  document.getElementById('gallery-id').value = '';
-  document.getElementById('gallery-submit-btn').textContent = 'Save Media';
-}
+/* ==================== GALLERY / SITE IMAGES ==================== */
 
-document.getElementById('reset-gallery-form-btn').addEventListener('click', resetGalleryForm);
-
-document.getElementById('gallery-form').addEventListener('submit', async (e) => {
-  e.preventDefault();
-  const btn = document.getElementById('gallery-submit-btn');
-  await withBusyButton(btn, 'Uploading...', async () => {
-    try {
-      const id = document.getElementById('gallery-id').value;
-      const fd = new FormData();
-      fd.append('title', document.getElementById('gallery-title').value.trim());
-      fd.append('category', document.getElementById('gallery-category').value);
-      fd.append('caption', document.getElementById('gallery-caption').value.trim());
-      const file = document.getElementById('gallery-image').files[0];
-      if (file) fd.append('media', file);
-
-      const url = id ? `/api/admin/gallery/${id}` : '/api/admin/gallery';
-      const method = id ? 'PUT' : 'POST';
-      const res = await apiUploadWithProgress(url, method, fd, (pct) => {
-        if (file) btn.textContent = pct < 100 ? `Uploading ${pct}%...` : 'Processing...';
-      });
-      showToast(res.message);
-      resetGalleryForm();
-      await loadGallery();
-    } catch (err) {
-      showToast(err.message, true);
-    }
-  });
+router.get('/gallery', async (req, res, next) => {
+  try {
+    const items = await all('SELECT * FROM gallery_images ORDER BY display_order ASC, created_at DESC');
+    res.json(items);
+  } catch (err) {
+    next(err);
+  }
 });
 
-/* ==================== PROFILE & LOGO ==================== */
-
-async function loadProfile() {
-  const p = await apiFetch('/api/admin/profile');
-  if (!p) return;
-
-  document.getElementById('sidebar-logo').src = p.logo_url;
-  document.getElementById('preview-logo').src = p.logo_url;
-  if (p.hero_image_url) document.getElementById('preview-hero').src = p.hero_image_url;
-
-  document.getElementById('prof-name').value = p.name || '';
-  document.getElementById('prof-tagline').value = p.tagline || '';
-  document.getElementById('prof-about').value = p.about || '';
-  document.getElementById('prof-vision').value = p.vision || '';
-  document.getElementById('prof-mission').value = p.mission || '';
-  document.getElementById('prof-values').value = p.values_text || '';
-  document.getElementById('prof-phone').value = p.phone || '';
-  document.getElementById('prof-whatsapp').value = p.whatsapp || '';
-  document.getElementById('prof-wa-msg').value = p.whatsapp_message || '';
-  document.getElementById('prof-email').value = p.email || '';
-  document.getElementById('prof-email2').value = p.secondary_email || '';
-  document.getElementById('prof-reg').value = p.reg_no || '';
-  document.getElementById('prof-tpin').value = p.tpin || '';
-  document.getElementById('prof-location').value = p.address || '';
-  document.getElementById('prof-instagram').value = p.instagram_url || '';
-  document.getElementById('prof-facebook').value = p.facebook_url || '';
-  document.getElementById('prof-linkedin').value = p.linkedin_url || '';
-  document.getElementById('prof-tiktok').value = p.tiktok_url || '';
-}
-
-document.getElementById('profile-form').addEventListener('submit', async (e) => {
-  e.preventDefault();
-  const btn = document.getElementById('profile-submit-btn');
-  await withBusyButton(btn, 'Saving...', async () => {
-    try {
-      const payload = {
-        name: document.getElementById('prof-name').value,
-        tagline: document.getElementById('prof-tagline').value,
-        about: document.getElementById('prof-about').value,
-        vision: document.getElementById('prof-vision').value,
-        mission: document.getElementById('prof-mission').value,
-        values_text: document.getElementById('prof-values').value,
-        phone: document.getElementById('prof-phone').value,
-        whatsapp: document.getElementById('prof-whatsapp').value,
-        whatsapp_message: document.getElementById('prof-wa-msg').value,
-        email: document.getElementById('prof-email').value,
-        secondary_email: document.getElementById('prof-email2').value,
-        reg_no: document.getElementById('prof-reg').value,
-        tpin: document.getElementById('prof-tpin').value,
-        address: document.getElementById('prof-location').value,
-        instagram_url: document.getElementById('prof-instagram').value,
-        facebook_url: document.getElementById('prof-facebook').value,
-        linkedin_url: document.getElementById('prof-linkedin').value,
-        tiktok_url: document.getElementById('prof-tiktok').value
-      };
-      const res = await apiFetch('/api/admin/profile', {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload)
-      });
-      showToast(res.message);
-    } catch (err) {
-      showToast(err.message, true);
+router.post('/gallery', uploadMedia, async (req, res, next) => {
+  try {
+    if (!req.file) {
+      return res.status(400).json({ error: 'Please select a photo or video file.' });
     }
-  });
+    const body = req.body || {};
+    const imageUrl = `/uploads/${req.file.filename}`;
+    const mediaType = isVideoMimeType(req.file.mimetype) ? 'video' : 'image';
+
+    const result = await run(
+      `INSERT INTO gallery_images (title, category, caption, image_url, media_type)
+       VALUES (?, ?, ?, ?, ?)`,
+      [
+        toTrimmedString(body.title, 'IMCC Project') || 'IMCC Project',
+        toTrimmedString(body.category, 'IMANI Mining') || 'IMANI Mining',
+        toTrimmedString(body.caption),
+        imageUrl,
+        mediaType
+      ]
+    );
+
+    const item = await get('SELECT * FROM gallery_images WHERE id = ?', [result.id]);
+    res.status(201).json({
+      message: mediaType === 'video' ? 'Video added to gallery.' : 'Image added to gallery.',
+      item
+    });
+  } catch (err) {
+    cleanupRequestFile(req);
+    next(err);
+  }
 });
 
-async function uploadProfileMedia(target, fileInputId) {
-  const file = document.getElementById(fileInputId).files[0];
-  if (!file) return;
-  const fd = new FormData();
-  fd.append('target', target);
-  fd.append('image', file);
-  const res = await apiFetch('/api/admin/profile/media', { method: 'POST', body: fd });
-  showToast(res.message);
-  await loadProfile();
-}
-
-document.getElementById('logo-upload-form').addEventListener('submit', async (e) => {
-  e.preventDefault();
-  const btn = e.target.querySelector('button[type="submit"]');
-  await withBusyButton(btn, 'Uploading...', async () => {
-    try {
-      await uploadProfileMedia('logo', 'logo-file-input');
-      e.target.reset();
-    } catch (err) {
-      showToast(err.message, true);
+router.put('/gallery/:id', uploadMedia, async (req, res, next) => {
+  try {
+    const id = parsePositiveId(req.params.id);
+    if (!id) {
+      cleanupRequestFile(req);
+      return res.status(400).json({ error: 'Invalid media ID.' });
     }
-  });
+
+    const existing = await get('SELECT * FROM gallery_images WHERE id = ?', [id]);
+    if (!existing) {
+      cleanupRequestFile(req);
+      return res.status(404).json({ error: 'Media item not found.' });
+    }
+
+    let imageUrl = existing.image_url;
+    let mediaType = existing.media_type || inferMediaTypeFromUrl(existing.image_url);
+    let oldImageToDelete = '';
+    if (req.file) {
+      oldImageToDelete = existing.image_url;
+      imageUrl = `/uploads/${req.file.filename}`;
+      mediaType = isVideoMimeType(req.file.mimetype) ? 'video' : 'image';
+    }
+
+    const body = req.body || {};
+    await run(
+      'UPDATE gallery_images SET title = ?, category = ?, caption = ?, image_url = ?, media_type = ? WHERE id = ?',
+      [
+        toTrimmedString(body.title, existing.title) || existing.title,
+        toTrimmedString(body.category, existing.category) || existing.category,
+        body.caption !== undefined ? toTrimmedString(body.caption) : existing.caption,
+        imageUrl,
+        mediaType,
+        id
+      ]
+    );
+
+    if (oldImageToDelete) removeUploadedFile(oldImageToDelete);
+
+    const updated = await get('SELECT * FROM gallery_images WHERE id = ?', [id]);
+    res.json({
+      message: mediaType === 'video' ? 'Video updated.' : 'Image updated.',
+      item: updated
+    });
+  } catch (err) {
+    cleanupRequestFile(req);
+    next(err);
+  }
 });
 
-document.getElementById('hero-upload-form').addEventListener('submit', async (e) => {
-  e.preventDefault();
-  const btn = e.target.querySelector('button[type="submit"]');
-  await withBusyButton(btn, 'Uploading...', async () => {
-    try {
-      await uploadProfileMedia('hero', 'hero-file-input');
-      e.target.reset();
-    } catch (err) {
-      showToast(err.message, true);
+router.delete('/gallery/:id', async (req, res, next) => {
+  try {
+    const id = parsePositiveId(req.params.id);
+    if (!id) return res.status(400).json({ error: 'Invalid media ID.' });
+
+    const existing = await get('SELECT * FROM gallery_images WHERE id = ?', [id]);
+    if (!existing) {
+      return res.status(404).json({ error: 'Media item not found.' });
     }
-  });
+    await run('DELETE FROM gallery_images WHERE id = ?', [id]);
+    removeUploadedFile(existing.image_url);
+    res.json({ message: 'Media item removed from gallery.' });
+  } catch (err) {
+    next(err);
+  }
 });
 
 /* ==================== SERVICES ==================== */
 
-async function loadServices() {
-  servicesCache = await apiFetch('/api/admin/services');
-  const list = document.getElementById('admin-services-list');
-  if (!servicesCache.length) {
-    list.innerHTML = '<p class="muted">No services configured.</p>';
-    return;
-  }
-
-  list.innerHTML = servicesCache
-    .map(
-      (s) => `
-      <div class="item-row">
-        <div class="item-left">
-          ${s.image_url ? `<img src="${escapeHtml(s.image_url)}" class="item-thumb" alt="${escapeHtml(s.title)}" loading="lazy" />` : '<div class="item-thumb" aria-hidden="true"></div>'}
-          <div>
-            <strong>${escapeHtml(s.category)} &mdash; ${escapeHtml(s.title)}</strong>
-            <div class="muted">
-              <span class="status-pill ${s.is_active ? 'status-live' : 'status-draft'}">
-                ${s.is_active ? 'Visible' : 'Hidden'}
-              </span>
-              ${escapeHtml(s.description)}
-            </div>
-          </div>
-        </div>
-        <div class="item-actions">
-          <button type="button" class="btn btn-outline btn-sm" data-service-action="edit" data-id="${s.id}">Edit</button>
-          <button type="button" class="btn btn-danger btn-sm" data-service-action="delete" data-id="${s.id}">Delete</button>
-        </div>
-      </div>
-    `
-    )
-    .join('');
-}
-
-document.getElementById('admin-services-list').addEventListener('click', async (e) => {
-  const btn = e.target.closest('button[data-service-action]');
-  if (!btn) return;
-  const id = Number(btn.dataset.id);
-  const action = btn.dataset.serviceAction;
-
-  if (action === 'edit') {
-    const s = servicesCache.find((x) => x.id === id);
-    if (!s) return;
-    document.getElementById('service-id').value = s.id;
-    document.getElementById('service-category').value = s.category;
-    document.getElementById('service-title').value = s.title;
-    document.getElementById('service-description').value = s.description || '';
-    document.getElementById('service-active').checked = Boolean(s.is_active);
-    document.getElementById('service-submit-btn').textContent = 'Update Service';
-    window.scrollTo({ top: 0, behavior: 'smooth' });
-  } else if (action === 'delete') {
-    if (!confirm('Delete this service?')) return;
-    try {
-      const res = await apiFetch(`/api/admin/services/${id}`, { method: 'DELETE' });
-      showToast(res.message);
-      await loadServices();
-    } catch (err) {
-      showToast(err.message, true);
-    }
-  }
-});
-
-function resetServiceForm() {
-  document.getElementById('service-form').reset();
-  document.getElementById('service-id').value = '';
-  document.getElementById('service-active').checked = true;
-  document.getElementById('service-submit-btn').textContent = 'Save Service';
-}
-
-document.getElementById('reset-service-form-btn').addEventListener('click', resetServiceForm);
-
-document.getElementById('service-form').addEventListener('submit', async (e) => {
-  e.preventDefault();
-  const btn = document.getElementById('service-submit-btn');
-  await withBusyButton(btn, 'Saving...', async () => {
-    try {
-      const id = document.getElementById('service-id').value;
-      const fd = new FormData();
-      fd.append('category', document.getElementById('service-category').value.trim());
-      fd.append('title', document.getElementById('service-title').value.trim());
-      fd.append('description', document.getElementById('service-description').value.trim());
-      fd.append('is_active', document.getElementById('service-active').checked ? '1' : '0');
-      const file = document.getElementById('service-image').files[0];
-      if (file) fd.append('image', file);
-
-      const url = id ? `/api/admin/services/${id}` : '/api/admin/services';
-      const method = id ? 'PUT' : 'POST';
-      const res = await apiFetch(url, { method, body: fd });
-      showToast(res.message);
-      resetServiceForm();
-      await loadServices();
-    } catch (err) {
-      showToast(err.message, true);
-    }
-  });
-});
-
-/* ==================== PASSWORD ==================== */
-
-document.getElementById('password-form').addEventListener('submit', async (e) => {
-  e.preventDefault();
-  const newPassword = document.getElementById('new-password').value;
-  const confirmPassword = document.getElementById('confirm-password').value;
-  if (newPassword !== confirmPassword) {
-    showToast('New password and confirmation do not match.', true);
-    return;
-  }
-
-  const btn = document.getElementById('password-submit-btn');
-  await withBusyButton(btn, 'Updating...', async () => {
-    try {
-      const res = await apiFetch('/api/auth/password', {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          currentPassword: document.getElementById('current-password').value,
-          newPassword
-        })
-      });
-      showToast(res.message);
-      e.target.reset();
-    } catch (err) {
-      showToast(err.message, true);
-    }
-  });
-});
-
-/* ==================== BOOT ==================== */
-
-async function loadAllAdminData() {
-  await Promise.all([loadPosts(), loadGallery(), loadProfile(), loadServices()]);
-}
-
-(async function boot() {
-  if (!getToken()) {
-    showLogin();
-    return;
-  }
+router.get('/services', async (req, res, next) => {
   try {
-    const { chef } = await apiFetch('/api/auth/me');
-    showDashboard(chef);
-    await loadAllAdminData();
-  } catch {
-    showLogin();
+    const services = await all('SELECT * FROM services ORDER BY display_order ASC, id ASC');
+    res.json(services);
+  } catch (err) {
+    next(err);
   }
-})();
+});
+
+router.post('/services', uploadImage.single('image'), async (req, res, next) => {
+  try {
+    const body = req.body || {};
+    const category = toTrimmedString(body.category);
+    const title = toTrimmedString(body.title);
+    if (!category || !title) {
+      cleanupRequestFile(req);
+      return res.status(400).json({ error: 'Category and title are required.' });
+    }
+    const imageUrl = req.file ? `/uploads/${req.file.filename}` : '';
+    const isActive = body.is_active === '0' || body.is_active === false ? 0 : 1;
+    const result = await run(
+      'INSERT INTO services (category, title, description, image_url, is_active) VALUES (?, ?, ?, ?, ?)',
+      [category, title, toTrimmedString(body.description), imageUrl, isActive]
+    );
+    const service = await get('SELECT * FROM services WHERE id = ?', [result.id]);
+    res.status(201).json({ message: 'Service added.', service });
+  } catch (err) {
+    cleanupRequestFile(req);
+    next(err);
+  }
+});
+
+router.put('/services/:id', uploadImage.single('image'), async (req, res, next) => {
+  try {
+    const id = parsePositiveId(req.params.id);
+    if (!id) {
+      cleanupRequestFile(req);
+      return res.status(400).json({ error: 'Invalid service ID.' });
+    }
+
+    const existing = await get('SELECT * FROM services WHERE id = ?', [id]);
+    if (!existing) {
+      cleanupRequestFile(req);
+      return res.status(404).json({ error: 'Service not found.' });
+    }
+
+    const body = req.body || {};
+    let imageUrl = existing.image_url;
+    let oldImageToDelete = '';
+
+    if (req.file) {
+      oldImageToDelete = existing.image_url;
+      imageUrl = `/uploads/${req.file.filename}`;
+    } else if (body.remove_image === '1' || body.remove_image === true) {
+      oldImageToDelete = existing.image_url;
+      imageUrl = '';
+    }
+
+    const isActive =
+      body.is_active !== undefined
+        ? body.is_active === '0' || body.is_active === false
+          ? 0
+          : 1
+        : existing.is_active;
+
+    await run(
+      'UPDATE services SET category = ?, title = ?, description = ?, image_url = ?, is_active = ? WHERE id = ?',
+      [
+        toTrimmedString(body.category, existing.category) || existing.category,
+        toTrimmedString(body.title, existing.title) || existing.title,
+        body.description !== undefined ? toTrimmedString(body.description) : existing.description,
+        imageUrl,
+        isActive,
+        id
+      ]
+    );
+
+    if (oldImageToDelete) removeUploadedFile(oldImageToDelete);
+
+    const updated = await get('SELECT * FROM services WHERE id = ?', [id]);
+    res.json({ message: 'Service updated.', service: updated });
+  } catch (err) {
+    cleanupRequestFile(req);
+    next(err);
+  }
+});
+
+router.delete('/services/:id', async (req, res, next) => {
+  try {
+    const id = parsePositiveId(req.params.id);
+    if (!id) return res.status(400).json({ error: 'Invalid service ID.' });
+
+    const existing = await get('SELECT * FROM services WHERE id = ?', [id]);
+    if (!existing) {
+      return res.status(404).json({ error: 'Service not found.' });
+    }
+    await run('DELETE FROM services WHERE id = ?', [id]);
+    removeUploadedFile(existing.image_url);
+    res.json({ message: 'Service deleted.' });
+  } catch (err) {
+    next(err);
+  }
+});
+
+module.exports = router;
