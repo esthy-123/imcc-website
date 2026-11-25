@@ -1,0 +1,341 @@
+<!DOCTYPE html>
+<html lang="en" translate="no" class="notranslate">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="google" content="notranslate" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+  <meta name="robots" content="noindex, nofollow" />
+  <meta name="theme-color" content="#0A192F" />
+  <title>Executive Portal — IMCC Administration</title>
+  <link rel="icon" type="image/jpeg" href="/assets/images/logo-imcc.jpg" />
+  <link rel="apple-touch-icon" href="/assets/images/logo-imcc.jpg" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Plus+Jakarta+Sans:wght@600;700;800&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="/css/admin.css" />
+</head>
+<body>
+  <!-- Director / Executive Login Screen -->
+  <main id="login-screen" class="login-wrapper">
+    <div class="login-card">
+      <img src="/assets/images/logo-imcc.jpg" alt="IMCC Logo" class="login-logo" width="84" height="84" />
+      <h1>IMCC Executive Portal</h1>
+      <p class="muted">Sign in to manage publications, photos &amp; videos, services, and the company profile.</p>
+
+      <form id="login-form" class="form-stack">
+        <label>
+          Executive Email
+          <input type="email" id="login-email" autocomplete="username" required placeholder="admin@imanimining.com" />
+        </label>
+        <label>
+          Password
+          <input type="password" id="login-password" autocomplete="current-password" required placeholder="••••••••" />
+        </label>
+        <button type="submit" id="login-submit-btn" class="btn btn-primary">Sign In</button>
+      </form>
+      <p id="login-error" class="error-msg hidden" role="alert"></p>
+      <a href="/" class="back-link">&larr; Back to Public Website</a>
+    </div>
+  </main>
+
+  <!-- Executive Dashboard -->
+  <div id="dashboard-screen" class="dashboard hidden">
+    <aside class="sidebar">
+      <div class="sidebar-top">
+        <div class="sidebar-brand">
+          <img id="sidebar-logo" src="/assets/images/logo-imcc.jpg" alt="IMCC Logo" width="44" height="44" />
+          <div>
+            <strong>IMCC Admin</strong>
+            <span id="chef-name-display" class="muted">Management</span>
+          </div>
+        </div>
+
+        <nav class="sidebar-nav" aria-label="Dashboard Sections">
+          <button type="button" class="tab-btn active" data-tab="posts" aria-current="page">Publications</button>
+          <button type="button" class="tab-btn" data-tab="gallery">Photos &amp; Videos</button>
+          <button type="button" class="tab-btn" data-tab="profile">Profile &amp; Logo</button>
+          <button type="button" class="tab-btn" data-tab="services">Services</button>
+          <button type="button" class="tab-btn" data-tab="security">Security</button>
+        </nav>
+      </div>
+
+      <div class="sidebar-footer">
+        <a href="/" target="_blank" rel="noopener noreferrer" class="btn btn-outline btn-sm">View Website &#8599;</a>
+        <button type="button" id="logout-btn" class="btn btn-danger btn-sm">Sign Out</button>
+      </div>
+    </aside>
+
+    <main class="main-panel">
+      <div id="toast" class="toast hidden" role="status" aria-live="polite"></div>
+
+      <!-- TAB 1: PUBLICATIONS -->
+      <section id="tab-posts" class="tab-content active">
+        <div class="panel-header">
+          <div>
+            <h2>Manage Publications</h2>
+            <p class="muted">Create, edit, unpublish, or delete publications shown on the website.</p>
+          </div>
+          <button type="button" id="reset-post-form-btn" class="btn btn-outline btn-sm">+ New Publication</button>
+        </div>
+
+        <form id="post-form" class="card form-grid">
+          <input type="hidden" id="post-id" />
+          <label>
+            Publication Title *
+            <input type="text" id="post-title" required placeholder="e.g., New Mining Drilling Operation" />
+          </label>
+          <label>
+            Division / Category
+            <select id="post-category">
+              <option value="IMANI Mining">IMANI Mining</option>
+              <option value="IMANI Construction">IMANI Construction</option>
+              <option value="IMANI Agriculture">IMANI Agriculture</option>
+            </select>
+          </label>
+          <label class="full-width">
+            Short Summary
+            <input type="text" id="post-summary" placeholder="Brief summary displayed on the card" />
+          </label>
+          <label class="full-width">
+            Full Content *
+            <textarea id="post-content" rows="4" required placeholder="Write the full publication details..."></textarea>
+          </label>
+          <label>
+            Photo or Video with Sound (JPG, PNG, WebP, GIF, MP4, WebM, MOV — max 100 MB)
+            <input type="file" id="post-image" accept="image/jpeg,image/png,image/webp,image/gif,video/mp4,video/webm,video/quicktime,video/ogg,video/x-m4v" />
+          </label>
+          <div class="checkbox-stack">
+            <label class="checkbox-row">
+              <input type="checkbox" id="post-published" checked />
+              Publish immediately on the public website
+            </label>
+            <label id="post-remove-img-row" class="checkbox-row hidden">
+              <input type="checkbox" id="post-remove-image" />
+              Remove existing photo or video
+            </label>
+          </div>
+          <div class="full-width form-actions">
+            <button type="submit" class="btn btn-primary" id="post-submit-btn">Save Publication</button>
+          </div>
+        </form>
+
+        <div id="admin-posts-list" class="items-list"></div>
+      </section>
+
+      <!-- TAB 2: GALLERY (PHOTOS & VIDEOS) -->
+      <section id="tab-gallery" class="tab-content">
+        <div class="panel-header">
+          <div>
+            <h2>Photos &amp; Videos Gallery</h2>
+            <p class="muted">Add, replace, or delete photos and videos with sound featured in the “Our Work” portfolio.</p>
+          </div>
+        </div>
+
+        <form id="gallery-form" class="card form-grid">
+          <input type="hidden" id="gallery-id" />
+          <label>
+            Media Title *
+            <input type="text" id="gallery-title" required placeholder="e.g., Mining Site Operations Video" />
+          </label>
+          <label>
+            Division / Category
+            <select id="gallery-category">
+              <option value="IMANI Mining">IMANI Mining</option>
+              <option value="IMANI Construction">IMANI Construction</option>
+              <option value="IMANI Agriculture">IMANI Agriculture</option>
+            </select>
+          </label>
+          <label class="full-width">
+            Caption / Description
+            <input type="text" id="gallery-caption" placeholder="Short project description" />
+          </label>
+          <label class="full-width">
+            Photo or Video with Sound (required when adding, optional when editing — MP4, WebM, MOV, JPG, PNG — max 100 MB)
+            <input type="file" id="gallery-image" accept="image/jpeg,image/png,image/webp,image/gif,video/mp4,video/webm,video/quicktime,video/ogg,video/x-m4v" />
+          </label>
+          <div class="full-width form-actions">
+            <button type="submit" class="btn btn-primary" id="gallery-submit-btn">Save Media</button>
+            <button type="button" id="reset-gallery-form-btn" class="btn btn-outline btn-sm">Cancel</button>
+          </div>
+        </form>
+
+        <div id="admin-gallery-list" class="gallery-admin-grid"></div>
+      </section>
+
+      <!-- TAB 3: COMPANY PROFILE & LOGO -->
+      <section id="tab-profile" class="tab-content">
+        <div class="panel-header">
+          <div>
+            <h2>Company Profile, Logo &amp; Social Media</h2>
+            <p class="muted">Update official details, the company logo, hero cover image, Call/WhatsApp number, and social links.</p>
+          </div>
+        </div>
+
+        <div class="media-upload-grid">
+          <form id="logo-upload-form" class="card media-card">
+            <h3>Company Logo / Profile Image</h3>
+            <img id="preview-logo" src="/assets/images/logo-imcc.jpg" alt="Current Logo" class="preview-thumb" />
+            <input type="file" id="logo-file-input" accept="image/jpeg,image/png,image/webp,image/gif" required />
+            <button type="submit" class="btn btn-primary btn-sm">Replace Logo</button>
+          </form>
+
+          <form id="hero-upload-form" class="card media-card">
+            <h3>Hero Cover Banner</h3>
+            <img id="preview-hero" src="/assets/pdf/hero-mining.jpg" alt="Current Cover" class="preview-thumb preview-wide" />
+            <input type="file" id="hero-file-input" accept="image/jpeg,image/png,image/webp,image/gif" required />
+            <button type="submit" class="btn btn-primary btn-sm">Replace Cover</button>
+          </form>
+        </div>
+
+        <form id="profile-form" class="card form-grid">
+          <label class="full-width">
+            Company Name *
+            <input type="text" id="prof-name" required />
+          </label>
+          <label class="full-width">
+            Tagline
+            <input type="text" id="prof-tagline" />
+          </label>
+          <label class="full-width">
+            About Us
+            <textarea id="prof-about" rows="4"></textarea>
+          </label>
+          <label>
+            Our Vision
+            <textarea id="prof-vision" rows="2"></textarea>
+          </label>
+          <label>
+            Our Mission
+            <textarea id="prof-mission" rows="2"></textarea>
+          </label>
+          <label class="full-width">
+            Our Values
+            <textarea id="prof-values" rows="2"></textarea>
+          </label>
+          <label>
+            Phone Number (Direct Call) *
+            <input type="text" id="prof-phone" required placeholder="+260962806591" />
+          </label>
+          <label>
+            WhatsApp Number (digits with country code) *
+            <input type="text" id="prof-whatsapp" required placeholder="260962806591" />
+          </label>
+          <label class="full-width">
+            Pre-filled WhatsApp Message
+            <input type="text" id="prof-wa-msg" />
+          </label>
+          <label>
+            Primary Email
+            <input type="email" id="prof-email" />
+          </label>
+          <label>
+            Secondary Email
+            <input type="email" id="prof-email2" />
+          </label>
+          <label>
+            Registration Number (Reg No)
+            <input type="text" id="prof-reg" />
+          </label>
+          <label>
+            TPIN
+            <input type="text" id="prof-tpin" />
+          </label>
+          <label class="full-width">
+            Location for Map
+            <input type="text" id="prof-location" placeholder="Ndola, Zambia" />
+          </label>
+
+          <label>
+            Instagram URL
+            <input type="url" id="prof-instagram" placeholder="https://instagram.com/..." />
+          </label>
+          <label>
+            Facebook URL
+            <input type="url" id="prof-facebook" placeholder="https://facebook.com/..." />
+          </label>
+          <label>
+            LinkedIn URL
+            <input type="url" id="prof-linkedin" placeholder="https://linkedin.com/company/..." />
+          </label>
+          <label>
+            TikTok URL
+            <input type="url" id="prof-tiktok" placeholder="https://tiktok.com/@..." />
+          </label>
+
+          <div class="full-width form-actions">
+            <button type="submit" id="profile-submit-btn" class="btn btn-primary">Save Profile</button>
+          </div>
+        </form>
+      </section>
+
+      <!-- TAB 4: SERVICES -->
+      <section id="tab-services" class="tab-content">
+        <div class="panel-header">
+          <div>
+            <h2>Manage Services</h2>
+            <p class="muted">Add or update the divisions and services displayed on the homepage.</p>
+          </div>
+        </div>
+
+        <form id="service-form" class="card form-grid">
+          <input type="hidden" id="service-id" />
+          <label>
+            Division / Category *
+            <input type="text" id="service-category" required placeholder="e.g., IMANI Mining" />
+          </label>
+          <label>
+            Service Title *
+            <input type="text" id="service-title" required placeholder="e.g., Mining Operations & Equipment" />
+          </label>
+          <label class="full-width">
+            Description
+            <textarea id="service-description" rows="2"></textarea>
+          </label>
+          <label>
+            Illustration Image (optional — max 5 MB)
+            <input type="file" id="service-image" accept="image/jpeg,image/png,image/webp,image/gif" />
+          </label>
+          <label class="checkbox-row">
+            <input type="checkbox" id="service-active" checked />
+            Visible on the public website
+          </label>
+          <div class="full-width form-actions">
+            <button type="submit" class="btn btn-primary" id="service-submit-btn">Save Service</button>
+            <button type="button" id="reset-service-form-btn" class="btn btn-outline btn-sm">Cancel</button>
+          </div>
+        </form>
+
+        <div id="admin-services-list" class="items-list"></div>
+      </section>
+
+      <!-- TAB 5: SECURITY -->
+      <section id="tab-security" class="tab-content">
+        <div class="panel-header">
+          <div>
+            <h2>Executive Account Security</h2>
+            <p class="muted">Update your administrator password regularly.</p>
+          </div>
+        </div>
+
+        <form id="password-form" class="card form-stack" style="max-width: 480px;">
+          <label>
+            Current Password
+            <input type="password" id="current-password" autocomplete="current-password" required />
+          </label>
+          <label>
+            New Password (at least 8 characters)
+            <input type="password" id="new-password" autocomplete="new-password" minlength="8" required />
+          </label>
+          <label>
+            Confirm New Password
+            <input type="password" id="confirm-password" autocomplete="new-password" minlength="8" required />
+          </label>
+          <button type="submit" id="password-submit-btn" class="btn btn-primary">Update Password</button>
+        </form>
+      </section>
+    </main>
+  </div>
+
+  <script src="/js/admin.js"></script>
+</body>
+</html>
